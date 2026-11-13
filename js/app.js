@@ -90,12 +90,12 @@ const CURRENCIES = {
             btnTcmb.className = 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 text-slate-950 transition flex items-center gap-1.5 shadow';
             btnEcb.className = 'px-3 py-1.5 rounded-lg text-xs font-semibold text-mistral-slate hover:text-mistral-ink transition flex items-center gap-1.5';
             tcmbTypeBox.classList.remove('hidden');
-            convSourceLabel.innerText = '🏛️ TCMB Resmi Kurları';
-            document.getElementById('matrix-title').innerHTML = '<span>🏛️</span> TCMB Gösterge Kurları';
-            document.getElementById('matrix-desc').innerText = 'TCMB resmi döviz ve efektif alış/satış kurları:';
-            document.getElementById('th-col-1').innerText = 'Döviz Alış';
-            document.getElementById('th-col-2').innerText = 'Döviz Satış';
-            document.getElementById('th-col-3').innerText = 'Efektif Satış';
+            convSourceLabel.innerText = '🇹🇷 TRY Bazlı Açık Kurlar';
+            document.getElementById('matrix-title').innerHTML = '<span>💱</span> TRY Bazlı Gösterge Kurları';
+            document.getElementById('matrix-desc').innerText = 'Doğrudan açık CORS API üzerinden TRY karşılığı gösterge kurları:';
+            document.getElementById('th-col-1').innerText = 'Birim (Alış Tah.)';
+            document.getElementById('th-col-2').innerText = 'Orta Kur (TRY)';
+            document.getElementById('th-col-3').innerText = 'Efektif Tah.';
             if (!tcmbData) await fetchTcmbRates();
             updateSourceBadge();
           } else {
@@ -133,23 +133,82 @@ const CURRENCIES = {
         function updateSourceBadge() {
           const badge = document.getElementById('source-date-badge');
           if (activeSource === 'tcmb' && tcmbData) {
-            badge.innerText = `TCMB Bülten: ${tcmbData.tarih} (No: ${tcmbData.bultenNo})`;
+            badge.innerText = `${tcmbData.bultenNo || 'Açık API'}: ${tcmbData.tarih}`;
           } else if (activeSource === 'ecb' && ecbData) {
             badge.innerText = `ECB Kapanış: ${ecbData.date}`;
           }
         }
 
-        // 2. TCMB ve ECB Veri Çekme
+        function buildTryRatesDataset(tryRatesMap, dateLabel, sourceLabel) {
+          const rates = {};
+          Object.keys(CURRENCIES).forEach(code => {
+            if (code === 'TRY') return;
+            const perTry = Number(tryRatesMap[code] ?? tryRatesMap[code.toLowerCase()]);
+            if (!perTry || perTry <= 0) return;
+            const midTry = 1 / perTry;
+            rates[code] = {
+              code,
+              name: CURRENCIES[code].name,
+              unit: 1,
+              forexBuying: midTry,
+              forexSelling: midTry,
+              banknoteBuying: midTry,
+              banknoteSelling: midTry
+            };
+          });
+          return {
+            success: true,
+            tarih: dateLabel,
+            bultenNo: sourceLabel,
+            rates
+          };
+        }
+
+        // 2. TRY Bazlı Açık Kurlar (Zero-Backend CORS API) ve ECB Veri Çekme
         async function fetchTcmbRates() {
+          // 1) ExchangeRate-API (Open CORS, 160+ para birimi)
           try {
-            const res = await fetch('https://app.melihkarasu.com/api/tcmb');
-            const data = await res.json();
-            if (data && data.success) {
-              tcmbData = data;
-              return data;
+            const res = await fetch('https://open.er-api.com/v6/latest/TRY', { signal: AbortSignal.timeout(7000) });
+            if (res.ok) {
+              const data = await res.json();
+              if (data && data.result === 'success' && data.rates) {
+                const dateLabel = data.time_last_update_utc
+                  ? new Date(data.time_last_update_utc).toLocaleDateString('tr-TR')
+                  : new Date().toLocaleDateString('tr-TR');
+                tcmbData = buildTryRatesDataset(data.rates, dateLabel, 'ExchangeRate-API');
+                return tcmbData;
+              }
             }
-          } catch(e) {
-            console.error('TCMB çekme hatası:', e);
+          } catch (e) {
+            console.warn('ExchangeRate-API hatası, yedek kaynağa geçiliyor:', e);
+          }
+
+          // 2) FawazAhmed0 Currency API CDN (Open CORS)
+          try {
+            const res = await fetch('https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/try.json', { signal: AbortSignal.timeout(7000) });
+            if (res.ok) {
+              const data = await res.json();
+              if (data && data.try) {
+                tcmbData = buildTryRatesDataset(data.try, data.date || new Date().toISOString().slice(0, 10), 'Currency-API CDN');
+                return tcmbData;
+              }
+            }
+          } catch (e) {
+            console.warn('Currency-API CDN hatası, Frankfurter yedek deneniyor:', e);
+          }
+
+          // 3) Frankfurter / ECB TRY bazlı yedek (Open CORS)
+          try {
+            const res = await fetch('https://api.frankfurter.dev/v1/latest?base=TRY', { signal: AbortSignal.timeout(7000) });
+            if (res.ok) {
+              const data = await res.json();
+              if (data && data.rates) {
+                tcmbData = buildTryRatesDataset(data.rates, data.date || new Date().toISOString().slice(0, 10), 'ECB/Frankfurter');
+                return tcmbData;
+              }
+            }
+          } catch (e) {
+            console.error('TRY kurları çekme hatası:', e);
           }
           return null;
         }
